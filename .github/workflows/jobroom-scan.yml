@@ -8,7 +8,8 @@ on:
       - '.github/workflows/jobroom-scan.yml'
 
 permissions:
-  contents: write
+  contents: read
+  issues: write
 
 jobs:
   scan:
@@ -22,15 +23,83 @@ jobs:
       - name: Install dependency
         run: python -m pip install --disable-pip-version-check requests
       - name: Run Job-Room scanner
-        run: python scan_jobroom.py
-      - name: Commit results
+        id: scanner
+        shell: bash
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add results/
-          if git diff --cached --quiet; then
-            echo 'No result changes to commit.'
-          else
-            git commit -m 'Add Job-Room scan results'
-            git push
-          fi
+          set +e
+          python scan_jobroom.py > scan.log 2>&1
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          tail -n 250 scan.log
+          exit 0
+      - name: Prepare diagnostic report
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          exit_code = '${{ steps.scanner.outputs.exit_code }}'
+          lines = [
+              '# Job-Room scan result',
+              '',
+              f'- Workflow run: ${{ github.run_id }}',
+              f'- Scanner exit code: {exit_code}',
+              '',
+          ]
+          report_path = Path('results/scan_report.json')
+          shortlist_path = Path('results/shortlist.json')
+          if report_path.exists():
+              report = json.loads(report_path.read_text(encoding='utf-8'))
+              lines += [
+                  '## Counts',
+                  '',
+                  f"- Queries: {report.get('query_count')}",
+                  f"- Rows before deduplication: {report.get('downloaded_rows_before_dedup')}",
+                  f"- Unique jobs: {report.get('unique_job_count')}",
+                  f"- Detail errors: {report.get('detail_error_count')}",
+                  f"- Automatic shortlist: {report.get('shortlist_count')}",
+                  f"- Status counts: `{json.dumps(report.get('status_counts'), ensure_ascii=False)}`",
+                  f"- Language counts: `{json.dumps(report.get('language_counts'), ensure_ascii=False)}`",
+                  '',
+                  '## Query diagnostics',
+                  '',
+              ]
+              for q in report.get('queries', []):
+                  err = q.get('error') or ''
+                  lines.append(f"- **{q.get('query')}**: total={q.get('reported_total')}, downloaded={q.get('downloaded_rows')}, error=`{err[:500]}`")
+          else:
+              lines += ['## No report file was produced', '']
+
+          if shortlist_path.exists():
+              jobs = json.loads(shortlist_path.read_text(encoding='utf-8'))[:40]
+              lines += ['', '## Top automatic matches', '']
+              for i, job in enumerate(jobs, 1):
+                  url = job.get('best_application_url') or job.get('jobroom_detail_url') or ''
+                  title = job.get('title') or 'Untitled'
+                  company = job.get('company') or 'Unknown company'
+                  place = ', '.join(x for x in [job.get('city'), job.get('canton')] if x)
+                  date = job.get('publication_start') or ''
+                  score = job.get('relevance_score') or 0
+                  lines += [
+                      f"### {i}. {title} — {company}",
+                      f"- Location: {place}",
+                      f"- Published: {date}",
+                      f"- API status: {job.get('status')}",
+                      f"- Relevance score: {score}",
+                      f"- Apply: {url}",
+                      f"- Job-Room: {job.get('jobroom_detail_url') or ''}",
+                      f"- Matched queries: {', '.join(job.get('matched_queries') or [])}",
+                      f"- Description excerpt: {(job.get('description') or '')[:900]}",
+                      '',
+                  ]
+
+          log = Path('scan.log').read_text(encoding='utf-8', errors='replace') if Path('scan.log').exists() else ''
+          lines += ['', '## Last scanner log lines', '', '```text', '\n'.join(log.splitlines()[-120:]), '```']
+          body = '\n'.join(lines)
+          Path('issue_body.md').write_text(body[:60000], encoding='utf-8')
+          PY
+      - name: Publish diagnostic report as issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue create --title "Job-Room scan result ${{ github.run_id }}" --body-file issue_body.md
