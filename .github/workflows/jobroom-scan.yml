@@ -1,7 +1,10 @@
-name: One-off Job-Room scan
+name: Daily Job-Room scan
 
 on:
   workflow_dispatch:
+  schedule:
+    # GitHub cron uses UTC. 07:00 UTC is 09:00 in Switzerland during CEST.
+    - cron: '0 7 * * *'
   push:
     paths:
       - 'scan_jobroom.py'
