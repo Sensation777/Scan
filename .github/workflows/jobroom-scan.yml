@@ -106,3 +106,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh issue create --title "Job-Room scan result ${{ github.run_id }}" --body-file issue_body.md
+
+# Manual refresh marker: 2026-07-20
